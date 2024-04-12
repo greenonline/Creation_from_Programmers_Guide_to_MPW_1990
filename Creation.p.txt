@@ -1,0 +1,750 @@
+PROGRAM Creation;
+
+    USES MemTypes, QuickDraw, OSintf, Toolintf, Packintf, Traps, PrintTraps;
+        {Functions and procedures}
+    FUNCTION IsAppWindow(window: WindowPtr): BOOLEAN; 
+        FORWARD;
+    FUNCTION GetSleep: LONGINT; 
+        FORWARD;
+    PROCEDURE AboutDialog; 
+        FORWARD;
+    PROCEDURE AdjustMenus; 
+        FORWARD;
+    PROCEDURE DoActivate(becomingActive: BOOLEAN); 
+        FORWARD;
+    PROCEDURE DoKey ; 
+        FORWARD;
+    PROCEDURE DoMenu(result: LONGINT); 
+        FORWARD;
+    PROCEDURE DoUpdate; 
+        FORWARD;
+    PROCEDURE Initialize; 
+        FORWARD;
+    PROCEDURE PrintDoc; 
+        FORWARD;
+    PROCEDURE SetupMenus; 
+        FORWARD;
+    PROCEDURE UpdateActive; 
+        FORWARD;
+    PROCEDURE UpdateRects; 
+        FORWARD;
+    PROCEDURE FatalError(error: INTEGER); 
+        FORWARD;
+    PROCEDURE AlertUser(error: INTEGER); 
+        FORWARD;
+    FUNCTION TrapAvailable(tNumber: INTEGER; tType: TrapType) : BOOLEAN;
+        FORWARD;
+    PROCEDURE EventLoop; 
+        FORWARD;
+    PROCEDURE AdjustCursor; 
+        FORWARD;
+    PROCEDURE DoCloseWindow; 
+        FORWARD;
+    PROCEDURE DoOpenWindow; 
+        FORWARD;
+
+    CONST
+        kSysEnvironsVersion = 1; {Tells SysEnvirons what kind of SysEnvRec we understand} 
+        kOSEvent = app4Evt; {event used by MultiFinder} 
+        kSuspendResumeMessage = 1; {high byte of suspend/resume event message} 
+        kResumeMask = 1;
+        kMouseMovedMessage = $FA;
+        kMinHeap = 29 * 1024;
+        kMinSpace = 20 * 1024; {Minimum memory needed for app to run}
+        kErrStrings = 128; {Resource ID for STR# resource}
+        eWrongMachine = 1; {Indicies into STR# resources} 
+        eSmallSize = 2;
+        eNoMemory = 3;
+        eNoSpacePaste = 8;
+
+        {*** Resources ***}
+
+        rMenuBar = 128; {application's menu bar} rUserAlert = 129; {user error alert}
+
+        {*** Menu constants ***}
+
+        mApple = 128; {Apple menu} 
+        iAbout = 1;
+        mFile = 129; {File menu} 
+        iNew = 1;
+        iOpen = 2;
+        iClose = 4;
+        iPageSetup = 9; 
+        iPrint = 10; 
+        iQuit = 12;
+        mEdit = 130; {Edit menu} 
+        iUndo = 1;
+        iCut = 3;
+        iCopy = 4;
+        iPaste = 5; 
+        iClear = 6;
+
+        iSelectAll = 8;
+        mFont = 131; {Font menu (program fills in)} 
+        mSize = 132; {Size menu (program fills in)}
+        mStyle = 133; {Style menu} 
+        iPlain = 1;
+        iBold = 2;
+        iItalic = 3;
+        iUnderline = 4; 
+        iOutline = 5; 
+        iShadow = 6;
+
+    VAR
+        gStyle: TextStyle;
+        gMenu: MenuHandle;
+        gMac: SysEnvRec; {set up by Initialize} 
+        gHasWaitNextEvent: BOOLEAN; {set up by Initialize}
+        ginBackground: BOOLEAN; {maintained by Initialize and DoEvent}
+        quit: BOOLEAN; 
+        shiftDown: BOOLEAN; 
+        theChar: Char; 
+        templ: LONGINT;
+
+        mousePt: Point; 
+        dragRect: Rect; 
+        textRect: Rect; 
+        myEvent: EventRecord; 
+        myWindow: WindowPtr; 
+        theWindow: WindowPtr;
+        iBeamHdl: CursHandle;
+        textH: TEHandle;
+        printH: THPrint;
+        fontArray: ARRAY [1 .. 64] OF INTEGER; 
+        sizeArray: ARRAY [1..32] OF INTEGER;
+
+{ ********** EXECUTABLE CODE STARTS HERE ********** }
+
+    {$S Main}
+
+    PROCEDURE AboutDialog;
+
+        VAR
+            aRect: Rect;
+            oldPort: GrafPtr; 
+            aWindow: WindowPtr;
+
+        BEGIN 
+            GetPort(oldPort); 
+            WITH aRect DO
+                BEGIN
+                left := (screenbits.bounds.right - screenbits.bounds.left) DIV 2 - 100; 
+                right := left + 200;
+                top := (screenbits.bounds.bottom - screenbits.bounds.top) DIV 2 - 50;
+                bottom := top + 110;
+                END;
+            aWindow := NewWindow(NIL, aRect, '', TRUE, dBoxProc, Pointer( - 1), TRUE, 0);
+            SetPort(aWindow);
+            TextFont(systemFont);
+            MoveTo(10, 40);
+            Drawstring(' Welcome to Creation!'); 
+            MoveTo(24, 70);
+            DrawString('By [Put your name here]'); 
+            REPEAT
+                SystemTask 
+            UNTIL Button;
+            DisposeWindow(aWindow); 
+            SetPort(oldPort); 
+            FlushEvents(mUpMask + mDownMask, 0);
+        END; {AboutDialog} 
+
+    {$S Main}
+
+    PROCEDURE AdjustMenus;
+        VAR
+            flag: BOOLEAN;
+            i : INTEGER;
+            lineHeight: INTEGER; 
+            fontAscent: INTEGER; 
+            n : LONGINT;
+            curStyle: TextStyle; 
+            name: Str255;
+            item: Styleitem;
+            mode: INTEGER; { current style }
+        BEGIN
+            {clear check marks from the text menus} 
+            gMenu := GetMHandle(mFont);
+            FOR i := 1 TO CountMItems(gMenu) DO
+                CheckItem(gMenu, i, FALSE); 
+            gMenu := GetMHandle(mSize);
+            FOR i := 1 TO CountMItems(gMenu) DO
+                CheckItem(gMenu, i, FALSE); 
+            gMenu := GetMHandle(mStyle);
+            FOR i := 1 TO CountMItems(gMenu) DO 
+                CheckItem(gMenu, i, FALSE);
+            gMenu := GetMHandle(mFont);
+            FOR i := 1 TO CountMItems(gMenu) DO
+                BEGIN
+                    gMenu := GetMHandle(mFont);
+                    IF fontArray[i] = gStyle.tsFont THEN
+                        CheckItem(gMenu, i, TRUE); 
+                    END;
+            gMenu := GetMHandle(mSize);
+            FOR i := 1 TO CountMItems(gMenu) DO
+                BEGIN
+                gMenu := GetMHandle(mSize);
+                IF sizeArray[i] = gStyle.tsSize THEN
+                    CheckItem(gMenu, i, TRUE); 
+                END;
+            gMenu := GetMHandle(mStyle); mode := doFace;
+            IF TEContinuousStyle(mode, gStyle, textH) THEN
+                BEGIN
+
+                CheckItem(gMenu, iPlain, gStyle.tsface=[]);
+                CheckItem(gMenu, iBold, bold IN gStyle.tsface);
+                CheckItem(gMenu, iItalic, italic IN gStyle.tsface);
+                CheckItem(gMenu, iUnderline, underline IN gStyle.tsface);
+                CheckItem(gMenu, iOutline, outline IN gStyle.tsface);
+                CheckItem(gMenu, iShadow, shadow IN gStyle.tsface);
+                END 
+            ELSE
+                BEGIN
+                CheckItem(gMenu, iPlain, FALSE);
+                CheckItem(gMenu, iBold, FALSE);
+                CheckItem(gMenu, iItalic, FALSE);
+                CheckItem(gMenu, iUnderline, FALSE);
+                CheckItem(gMenu, iOutline, FALSE);
+                CheckItem(gMenu, iShadow, FALSE);
+                END; { IF }
+        END; {AdjustMenus} 
+
+    {$S Main}
+     
+    PROCEDURE DoActivate(becomingActive: BOOLEAN);
+        BEGIN
+            IF WindowPtr(myEvent.message) = myWindow THEN 
+                BEGIN
+                IF becomingActive THEN 
+                    BEGIN
+
+                    TEActivate(textH);
+                    gMenu := GetMHandle(mEdit);
+                    DisableItem(gMenu, 1);
+                    END 
+                ELSE
+                    BEGIN 
+                    TEDeactivate(textH);
+                    gMenu := GetMHandle(mEdit); 
+                    EnableItem(gMenu, 1);
+                    END;
+                END;
+        END; {DoActivate}
+
+
+    {$S Main} 
+
+    PROCEDURE DoKey ;
+        BEGIN
+           IF myWindow = FrontWindow THEN
+               theChar := CHR(BAND(myEvent.message, charCodeMask)); 
+           TEKey(theChar, textH);
+        END; {DoKey} 
+
+    {$S Main}
+
+    PROCEDURE DoMenu(result: LONGINT);
+        CONST
+            doToggle = 32; {requires system 6.0}
+        VAR
+            bool: BOOLEAN;
+            theItem: INTEGER; 
+            theMenu: INTEGER; 
+            temp: INTEGER; 
+            name: Str255;
+            ht, ascnt: INTEGER; 
+            hack: INTEGER;
+        BEGIN
+            theItem := LoWord(result); 
+            theMenu := HiWord(result); 
+            InitCursor;
+            CASE theMenu OF
+                mApple: {Apple menu}
+                    IF (theItem = 1) THEN
+                        AboutDialog 
+                    ELSE
+
+                        BEGIN
+                        gMenu := GetMHandle(mApple); 
+                        GetItem(gMenu, theItem, name); 
+                        temp := OpenDeskAcc(name); 
+                        SetPort(myWindow);
+                        END;
+                mFile: {File menu} 
+                    CASE theItem OF
+                        iOpen: DoOpenWindow; 
+                        iClose: DoCloseWindow; 
+                        iPageSetup: bool := PrStlDialog(printH); 
+                        iPrint: IF PrJobDialog(printH) THEN PrintDoc; 
+                        iQuit: quit := TRUE;
+                    END;
+                mEdit: {Edit menu}
+                    BEGIN
+                    IF NOT SystemEdit(theItem - 1) THEN
+                        CASE theItem OF 
+                            iCut:
+                                BEGIN {Cut}
+                                templ := ZeroScrap; 
+                                TECut(textH);
+                                END;
+                            iCopy:
+                                BEGIN {Copy}
+                                templ := ZeroScrap; 
+                                TECopy(textH);
+                                END;
+                            iPaste: TEStylPaste(textH); {Paste}
+                            iClear: TEDelete(textH); {Clear}
+                            iSelectAll: TESetSelect(0, 32767, textH);
+                        END;
+                    END;
+                mFont: {Font menu}
+                    BEGIN
+                    gMenu := GetMHandle(mFont);
+                    GetItem(gMenu, theItem, name); 
+                    GetFNum(name, temp);
+
+                    gStyle.tsFont := temp; 
+                    TESetStyle(doFont, gStyle, TRUE, textH) ; 
+                    END;
+                mSize: {Size menu} 
+                    BEGIN
+                    gMenu := GetMHandle(mSize); 
+                    GetItem(gMenu, theItem, name); 
+                    StringToNum(name, templ); 
+                    gStyle.tsSize := templ; 
+                    TESetStyle(doSize, gStyle, TRUE, textH); 
+                    END;
+                mStyle: {Style menu} 
+                    BEGIN
+                    HiliteMenu (6);
+                    IF theItem = 1 THEN
+                        BEGIN
+                        gStyle.tsface := []; 
+                        TESetStyle(doFace, gStyle, TRUE,textH) ; 
+                        END
+                    ELSE 
+                        BEGIN
+                        gStyle.tsface := []; 
+                        BitSet(@gStyle.tsface, 9 - theItem); 
+                        TESetStyle(doFace + doToggle, gStyle, TRUE, textH); 
+                        END;
+                    END;
+            END;
+            HiliteMenu(0); 
+        END; {DoMenu}
+
+    {$S Main}
+
+    PROCEDURE DoCloseWindow;
+
+        BEGIN
+            HideWindow(myWindow);
+            gMenu := GetMHandle(mFile); 
+            DisableItem(gMenu, iClose);
+            EnableItem(gMenu, iOpen); 
+        END; {DoCloseWindow}
+
+    {$S Main}
+
+    PROCEDURE DoOpenWindow;
+
+        BEGIN
+            ShowWindow(myWindow);
+            gMenu := GetMHandle(mFile); 
+            DisableItem(gMenu, iOpen); 
+            EnableItem(gMenu, iClose);
+        END; {DoOpenWindow} 
+
+    {$S Main}
+
+    PROCEDURE DoMouse;
+
+        VAR
+            thePart: INTEGER;
+        BEGIN
+            thePart := FindWindow(myEvent.where,theWindow) ; 
+            CASE thePart OF
+            inMenuBar:
+                BEGIN
+                    AdjustMenus; 
+                    DoMenu(MenuSelect(myEvent.where)); 
+                END;
+            inSysWindow: SystemClick(myEvent, theWindow); 
+            inContent:
+                BEGIN
+                    IF theWindow <> FrontWindow THEN
+                        SelectWindow(theWindow)
+                    ELSE IF theWindow = myWindow THEN
+                        BEGIN
+                            GlobalToLocal(myEvent.where); 
+                            shiftDown := BAND(myEvent.modifiers,shiftKey) <> 0; 
+                            TEClick(myEvent.where, shiftDown, textH) ; 
+                        END;
+
+
+                END;
+            inDrag: DragWindow(theWindow, myEvent.where, dragRect); 
+            inGrow:
+                BEGIN
+                    templ := GrowWindow(theWindow, myEvent.where, screenbits.bounds);
+                    InvalRect(theWindow^.portRect); 
+                    SizeWindow(theWindow, LoWord(templ), HiWord(templ), FALSE); 
+                    UpdateActive;
+                END;
+            inGoAway: 
+                IF TrackGoAway(theWindow, myEvent.where) THEN 
+                    DoCloseWindow; 
+            inZoomIn, inZoomOut:
+                IF TrackBox(theWindow, myEvent.where, thePart) THEN
+                    BEGIN
+                    ZoomWindow(theWindow, thePart, FALSE); 
+                    UpdateActive;
+                    END;
+                END;
+            END; {DoMouse}
+
+    {$S Main}
+
+    PROCEDURE AdjustCursor; {give time to DAs, set cursor, flash cursor}
+        BEGIN
+            IF (myWindow = FrontWindow) THEN
+                BEGIN
+                    GetMouse(mousePt);
+                    IF PtInRect(mousePt, textRect) THEN
+                        SetCursor(iBeamHdl^^) 
+                    ELSE
+                        SetCursor(arrow); 
+                    TEIdle (textH) ;
+                END;
+        END; {AdjustCursor}
+
+    {$S Main}
+
+    PROCEDURE DoUpdate;
+        BEGIN
+            theWindow := WindowPtr(myEvent.message); 
+            IF theWindow = myWindow THEN
+                BEGIN
+                SetPort(theWindow); 
+                BeginUpdate(theWindow); 
+                EraseRect(theWindow^.portRect); 
+                TEUpdate(theWindow^.portRect, textH); {draw the text} 
+                DrawGrowIcon(theWindow); 
+                EndUpdate(theWindow); 
+                END;
+            END; {DoUpdate} 
+
+{$S Initialize}
+
+FUNCTION TrapAvailable(tNumber: INTEGER; tType: TrapType) : BOOLEAN;
+    BEGIN
+        IF (tType = ToolTrap) & (gMac.machineType > envMachUnknown) & (gMac.machineType < envMacII) THEN
+        BEGIN {512KE, Plus, or SE}
+            tNumber := BAND(tNumber, $03FF);
+            IF tNumber > $01FF THEN {which means the tool traps}
+            tNumber := _Unimplemented; {only go to $01FF} 
+        END;
+        TrapAvailable := NGetTrapAddress(tNumber, tType) <> GetTrapAddress(_Unimplemented);
+    END; {TrapAvailable} 
+
+PROCEDURE Initialize;
+    VAR
+        count, ignoreError: INTEGER; 
+        menuBar: Handle;
+        total, contig: LONGINT; 
+        ignoreResult: BOOLEAN;
+        event: EventRecord;
+
+    BEGIN
+        ginBackground := FALSE;
+        FlushEvents(everyEvent, 0); 
+        InitGraf(@ thePort); 
+        InitFonts;
+        InitWindows;
+        InitMenus;
+        TEinit; 
+        InitDialogs(NIL); 
+        InitCursor; 
+        PrOpen;
+        printH := THPrint(newHandle(SizeOf(TPrint))); 
+        IF printH = NIL THEN DebugStr('Not enough memory for print record.');
+        PrintDefault(printH);
+        FOR count := 1 TO 3 DO {allow alert default button to be outlined}
+            ignoreResult := EventAvail(everyEvent, event) ;
+        ignoreError := SysEnvirons (kSysEnvironsVersion, gMac);
+        {If the machine doesn't have at least 128K ROMs, exit.}
+        IF gMac.machineType < 0 THEN 
+            FatalError (eWrongMachine);
+        gHasWaitNextEvent := TrapAvailable (_WaitNextEvent, ToolTrap);
+        IF ORD(GetApplLimit) - ORD(ApplicZone) < kMinHeap THEN
+            FatalError(eSmallSize);
+        {* ZeroScrap; *} {*** You can uncomment this--TEMPORARILY --for debugging***}
+
+
+        PurgeSpace(total, contig); 
+        IF total < kMinSpace THEN
+            IF UnloadScrap <> noErr THEN 
+                FatalError(eNoMemory)
+            ELSE 
+            BEGIN
+                PurgeSpace(total, contig);
+                IF total < kMinSpace THEN FatalError(eNoMemory); 
+            END;
+        {*****Now we set up our application's environment ******}
+        SetupMenus;
+        SetRect(dragRect, - 32767, - 32767, 32767, 32767);
+        {WITH screenBits.bounds DO SetRect(textRect, 4, 24, right-4, bottom-4);}
+        WITH screenbits.bounds DO SetRect(textRect, 2, 24, right - 2, bottom - 2); 
+        {InsetRect(textRect, 5, 20);} 
+        InsetRect(textRect, 5, 15);
+        myWindow := NewWindow(NIL, textRect, 'Creation', TRUE, zoomDocProc, Pointer( - 1), TRUE, 0); 
+        SetPort(myWindow);
+        UpdateRects;
+        TextFont(times);
+        TextSize(18);
+        textH := TEStylNew(textRect, textRect); 
+        TEAutoView(TRUE, textH);
+        iBeamHdl := GetCursor(iBeamCursor);
+        quit := FALSE; 
+    END; {Initialize}
+
+    {$S Main}
+
+    PROCEDURE PrintDoc; {print 1 page of text with its styles}
+
+        VAR
+            aRect: Rect;
+            printTE: TEHandle; printPort: TPPrPort; status: TPrStatus;
+        BEGIN
+            aRect := printH^^.rPaper; 
+            InsetRect(aRect, 72, 72);
+
+            printPort := PrOpenDoc(printH, NIL, NIL); 
+            printTE := TEStylNew(aRect, aRect);
+            IF printTE =NIL THEN DebugStr('Not enough memory to print TERec.'); 
+            printTE^^.inPort := GrafPtr(printPort);
+            {copy and paste our text and styles for print mgr}
+            TESetSelect(0, 32767, textH); 
+            TECopy(textH);
+            TESetSelect(0, 0, textH); 
+            TESetSelect(0, 0, printTE); 
+            TEStylPaste(printTE);
+            PrOpenPage(printPort, NIL);
+            TEUpdate(aRect, printTE); {draw text on the printer}
+            PrClosePage(printPort); 
+            PrCloseDoc(printPort);
+            TEDispose(printTE);
+            IF printH^^.prJob.bJDocLoop = bSpoolLoop THEN
+                PrPicFile(printH, NIL, NIL, NIL, status); 
+        END; {PrintDoc}
+
+    {$S Main}
+
+    PROCEDURE SetupMenus;
+
+        VAR
+            i , n : INTEGER;
+            l : LONGINT; s: Str255;
+
+            menuBar: Handle;
+        BEGIN
+            menuBar := GetNewMBar(rMenuBar); {read menus into menu bar}
+            IF menuBar = NIL THEN
+            FatalError(eNoMemory); 
+            SetMenuBar(menuBar); {install menus} 
+            DisposHandle(menuBar);
+            AddResMenu(GetMHandle(mApple), 'DRVR'); {add DA names to Apple menu} 
+            DrawMenuBar;
+            gMenu := GetMHandle(mFont); 
+            AddResMenu(gMenu, 'FONT');
+            FOR i := 1 TO CountMItems(gMenu) DO
+            BEGIN
+                gMenu := GetMHandle(mFont); 
+                GetItem(gMenu, i, s); 
+                GetFNum(s, n);
+                fontArray[i] := n;
+            END;
+            gMenu := GetMHandle(mSize);
+            FOR i := 1 TO CountMItems(gMenu) DO
+            BEGIN
+                gMenu := GetMHandle(mSize); 
+                GetItem(gMenu, i, s); 
+                StringToNum(s, l); 
+                sizeArray[i] := l;
+            END;
+            gMenu := GetMHandle(mFont);
+            FOR i := 1 TO CountMItems(gMenu) DO
+            BEGIN
+                gMenu := GetMHandle(mFont); 
+                GetItem(gMenu, i, s); 
+                GetFNum(s, n);
+                fontArray[i] := n;
+            END;
+            gMenu := GetMHandle(mSize);
+            FOR i := 1 TO CountMItems(gMenu) DO
+            BEGIN
+                gMenu := GetMHandle(mSize);
+
+                GetItem(gMenu, i, s); 
+                StringToNum(s, l); 
+                sizeArray[i] := l; 
+            END;
+        END; {SetupMenus} 
+
+    {$S Main}
+
+    PROCEDURE UpdateActive;
+        BEGIN 
+            InvalRect(myWindow^.portRect); 
+            UpdateRects;
+            WITH textH^^ DO
+            BEGIN
+                destRect := textRect; 
+                viewRect := textRect; 
+            END;
+            TECalText(textH); 
+        END; {UpdateActive}
+
+    {$S Main}
+
+    PROCEDURE UpdateRects;
+        BEGIN
+            textRect := thePort^.portRect; WITH textRect DO
+            BEGIN
+                left := left + 4; 
+                right := right - 20; 
+                bottom := bottom - 20; 
+            END;
+        END; {UpdateRects} 
+
+    {$S Main}
+
+    PROCEDURE FatalError(error: INTEGER);
+        BEGIN 
+            AlertUser(error); 
+            ExitToShell;
+        END; {FatalError}
+
+    {$S Main}
+
+    PROCEDURE AlertUser(error: INTEGER);
+    { Display an alert dialog when an error occurs }
+        VAR
+            itemHit: INTEGER; 
+            message: Str255;
+        BEGIN
+            SetCursor(arrow);
+            GetindString(message, kErrStrings, error);
+            ParamText (message, '', '', '');
+            itemHit := Alert(rUserAlert, NIL); 
+        END; {AlertUser}
+
+    {$S Main}
+
+    PROCEDURE EventLoop;
+
+        VAR
+            cursorRgn: RgnHandle; 
+            gotEvent: BOOLEAN; 
+            ignoreResult: BOOLEAN; 
+            mouse: Point;
+            key: Char;
+        BEGIN
+            cursorRgn := NewRgn; {we'll pass an empty region to WNE the first time thru}
+            REPEAT
+                IF gHasWaitNextEvent THEN
+                    ignoreResult := WaitNextEvent (everyEvent, myEvent, GetSleep,cursorRgn)
+                ELSE 
+                    BEGIN
+                    SystemTask;
+                    gotEvent := GetNextEvent(everyEvent, myEvent);
+                    END;
+
+
+            AdjustCursor;
+            CASE myEvent.what OF
+                mouseDown: DoMouse; 
+            keyDown, autoKey:
+            BEGIN
+                key := CHR(BAND(myEvent.message, charCodeMask));
+                IF BAND(myEvent.modifiers, cmdKey) <> 0 THEN
+                BEGIN { Command key down } 
+                    IF myEvent.what = keyDown THEN
+                    BEGIN
+                        AdjustMenus; 
+                        DoMenu(MenuKey(key)); 
+                    END; {IF}
+                END 
+            ELSE
+                DoKey;
+            END; {keyDown}
+
+            activateEvt: DoActivate (BAND(myEvent.modifiers, activeFlag) <> 0);
+            updateEvt: DoUpdate;
+            nullEvent: IF (textH <> NIL) THEN
+                IF (FrontWindow = myWindow) THEN TEidle (textH) ;
+                    kOSEvent:
+                CASE BAND(BROTL(myEvent.message, 8), $FF)OF
+                    kMouseMovedMessage: TEidle(textH); 
+                    kSuspendResumeMessage:
+                    BEGIN
+                        ginBackground := BAND(myEvent.message, kResumeMask) = 0; 
+                        DoActivate(NOT ginBackground) ; 
+                    END;
+               END;
+
+            END; 
+        UNTIL quit;
+        PrClose;
+    END; {EventLoop}
+
+    {$S Main}
+
+    FUNCTION GetSleep: LONGINT;
+        VAR
+            sleep: LONGINT;
+            window: WindowPtr;
+        BEGIN
+            sleep := MAXLONGINT; {default value for sleep} 
+            IF NOT ginBackground THEN
+            BEGIN {if we are in front ... }
+                window := FrontWindow; {and the front window is ours ... }
+                IF IsAppWindow(window) THEN
+                BEGIN
+                    WITH textH^^ DO
+                        IF selStart = selEnd THEN {and the selection is an insertion point ... }
+                            sleep := GetCaretTime; {we need to blink the insertion point}
+                END;
+            END;
+            GetSleep := sleep; 
+        END; {GetSleep}
+
+    {$S Main}
+
+    FUNCTION IsAppWindow(window: WindowPtr): BOOLEAN;
+        BEGIN
+            IF window = NIL THEN
+                IsAppWindow := FALSE
+            ELSE {application windows have windowKinds
+                userKind (8)}
+                WITH WindowPeek(window)^ DO IsAppWindow := (windowKind = userKind);
+        END; {IsAppWindow}
+
+    {********** THIS IS THE MAIN SEGMENT **********}
+
+    PROCEDURE _Datainit; 
+        EXTERNAL;
+    {This routine is automatically linked in by the MPW Linker. This external reference to it is done so that we can unload its segment, %A5Init.}
+
+    {$S Main}
+
+        BEGIN
+            UnloadSeg(@_Datainit); {note that Datainit must not be in Main!}
+            MaxApplZone; {expand the heap so code segments load at the top}
+            Initialize; {initialize the program} UnloadSeg(@Initialize); {note that Initialize must not be in Main!}
+            gStyle.tsFont := times;
+            gStyle.tsface := [];
+            gStyle.tsSize := 12;
+            TESetStyle(doAll, gStyle, FALSE, textH); 
+            AdjustMenus;
+            EventLoop; {call the main event loop} 
+        END.
